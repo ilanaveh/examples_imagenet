@@ -89,6 +89,7 @@ best_acc1 = 0
 def main():
     args = parser.parse_args()
     args.model_name = f'train_resnet_blur{args.blur}'
+    print(f"~~~{args.model_name}~~~")
 
     if args.seed is not None:
         random.seed(args.seed)
