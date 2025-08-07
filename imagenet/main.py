@@ -20,6 +20,8 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
+from PIL import ImageFilter  # IN: for GaussianBlur
+
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -53,8 +55,8 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=100, type=int,
                     metavar='N', help='print frequency (default: 10. IN: changed to 100)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
+parser.add_argument('--resume', default='code/examples_imagenet/imagenet/out', type=str, metavar='PATH',
+                    help='path to latest checkpoint (default: none. IN: changed to out directory)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
@@ -79,12 +81,14 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
+parser.add_argument('--blur', default=0, type=int, help="blur level for training")  # IN: add blur argument
 
 best_acc1 = 0
 
 
 def main():
     args = parser.parse_args()
+    args.model_name = f'train_resnet_blur{args.blur}'
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -208,8 +212,9 @@ def main_worker(gpu, ngpus_per_node, args):
     
     # optionally resume from a checkpoint
     if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
+        resume_checkpoint_file = os.path.join(args.resume, args.model_name, 'checkpoint.pth.tar')
+        if os.path.isfile(resume_checkpoint_file):
+            print("=> loading checkpoint '{}'".format(resume_checkpoint_file))
             if args.gpu is None:
                 checkpoint = torch.load(args.resume)
             else:
@@ -225,9 +230,9 @@ def main_worker(gpu, ngpus_per_node, args):
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
             print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+                  .format(resume_checkpoint_file, checkpoint['epoch']))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            print("=> no checkpoint found at '{}'".format(resume_checkpoint_file))
 
 
     # Data loading code
@@ -241,23 +246,33 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-        train_dataset = datasets.ImageFolder(
-            traindir,
-            transforms.Compose([
+        # IN: add blur transform
+
+        # original blur lists:
+        post_blur_transforms = {
+            'train': [
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 normalize,
-            ]))
-
-        val_dataset = datasets.ImageFolder(
-            valdir,
-            transforms.Compose([
+            ],
+            'val': [
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
-                normalize,
-            ]))
+                normalize
+            ]
+        }
+
+        if args.blur:
+            transforms_fin = {X: transforms.Compose([GaussianBlur(int(args.blur))] + post_blur_transforms[X])
+                              for X in ['train', 'val']}
+        else:
+            transforms_fin = {X: transforms.Compose(post_blur_transforms[X]) for X in ['train', 'val']}
+
+        train_dataset = datasets.ImageFolder(traindir, transforms_fin['train'])
+
+        val_dataset = datasets.ImageFolder(valdir, transforms_fin['val'])
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -296,14 +311,15 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
+            save_checkpoint_file_name = resume_checkpoint_file if args.resume else 'checkpoint.pth.tar'
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-                'scheduler' : scheduler.state_dict()
-            }, is_best)
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict()
+            }, is_best, filename=save_checkpoint_file_name)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -427,15 +443,18 @@ def validate(val_loader, model, criterion, args):
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+    print(f'Saving checkpoint (epoch {state["epoch"]}) at: {filename}')
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
 
 class Summary(Enum):
     NONE = 0
     AVERAGE = 1
     SUM = 2
     COUNT = 3
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -509,6 +528,7 @@ class ProgressMeter(object):
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
+
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():
@@ -524,6 +544,33 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+
+
+class GaussianBlur(object):
+    """Apply Gaussian blur filter with the given sigma to the input PIL Image.
+    Args:
+        sigma (int): Desired Gaussian blur level sigma
+
+    Taken from: W:\dannyh\work\code\PyTorch\vggface2_lookdir\datasets\custom_transforms.
+   """
+
+    def __init__(self, sigma):
+        assert isinstance(sigma, int)
+        self.sigma = sigma
+
+    def __call__(self, img):
+        """
+        Args:
+            img (PIL Image): Image to be scaled.
+        Returns:
+            PIL Image: Rescaled image.
+        """
+        img = img.filter(ImageFilter.GaussianBlur(radius=self.sigma))
+
+        return img
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(sigma={0})'.format(self.sigma)
 
 
 if __name__ == '__main__':
