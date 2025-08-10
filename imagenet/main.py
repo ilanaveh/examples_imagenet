@@ -22,6 +22,7 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 from PIL import ImageFilter  # IN: for GaussianBlur
 from tensorboardX import SummaryWriter
+import random  # for GaussianBlurRand
 
 
 model_names = sorted(name for name in models.__dict__
@@ -82,7 +83,9 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
-parser.add_argument('--blur', default=0, type=int, help="blur level for training")  # IN: add blur argument
+# IN: added arguments for training with blurry inputs (and blur_max for variable-blur training)
+parser.add_argument('--blur', default=0, type=int, help="blur level for training")
+parser.add_argument('--blur_max', default=None, type=int,help='For Variable-Blur training: max sigma')  # IN: add blur argument
 
 best_acc1 = 0
 
@@ -90,6 +93,7 @@ best_acc1 = 0
 def main():
     args = parser.parse_args()
     args.model_name = f'train_resnet_blur{args.blur}'
+    args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
     print(f"~~~{args.model_name}~~~")
 
     if args.seed is not None:
@@ -268,7 +272,12 @@ def main_worker(gpu, ngpus_per_node, args):
         }
 
         if args.blur:
-            transforms_fin = {X: transforms.Compose([GaussianBlur(int(args.blur))] + post_blur_transforms[X])
+            if args.blur_max:
+                blur_transform = GaussianBlurRand(int(args.blur), int(args.blur_max))
+            else:
+                blur_transform = GaussianBlur(int(args.blur))
+
+            transforms_fin = {X: transforms.Compose([blur_transform] + post_blur_transforms[X])
                               for X in ['train', 'val']}
         else:
             transforms_fin = {X: transforms.Compose(post_blur_transforms[X]) for X in ['train', 'val']}
@@ -317,8 +326,8 @@ def main_worker(gpu, ngpus_per_node, args):
         scheduler.step()
         
         # remember best acc@1 and save checkpoint
-        is_best = val_results['acc1'] > best_acc1
-        best_acc1 = max(val_results['acc1'], best_acc1)
+        is_best = val_stats['acc1'] > best_acc1
+        best_acc1 = max(val_stats['acc1'], best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -584,6 +593,46 @@ class GaussianBlur(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(sigma={0})'.format(self.sigma)
+
+
+class GaussianBlurRand(object):
+    """
+    Apply Gaussian blur filter to the input PIL Image, with a rondom choice between self.sigma_min-self.sigma_max.
+    if no sigma_max is given (or if sigma_min = sigma_max) -> same as regular GaussianBlur.
+    Taken from: DeepLabv3FineTuning-disClasses/pretraining_resnet/pretrain_resnet_var_blurs.py.
+    Args:
+        sigma_min (int): Desired Gaussian blur level sigma / lower bound
+        sigma_max (int; optional): Upper bound.
+   """
+
+    def __init__(self, sigma_min=0, sigma_max=None):
+        assert isinstance(sigma_min, int)
+        self.is_range = bool(sigma_max) & (sigma_min != sigma_max)
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+
+    def __call__(self, img, return_blur=False):
+        """
+        Args:
+            img (PIL Image): Image to be scaled.
+            return_blur (bool): Whether to return the chosen blur sigma.
+        Returns:
+            PIL Image: Rescaled image.
+            if return_blur=True: also return the chosen blur sigma.
+        """
+
+        radius = random.randint(self.sigma_min, self.sigma_max) if self.is_range else self.sigma_min
+        img = img.filter(ImageFilter.GaussianBlur(radius=radius))
+        if return_blur:
+            return img, radius
+        else:
+            return img
+
+    def __repr__(self):
+        if self.is_range:
+            return self.__class__.__name__ + '(sigma={}-{})'.format(self.sigma_min, self.sigma_max)
+        else:
+            return self.__class__.__name__ + '(sigma={})'.format(self.sigma_min)
 
 
 if __name__ == '__main__':
