@@ -21,6 +21,7 @@ import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 from PIL import ImageFilter  # IN: for GaussianBlur
+from tensorboardX import SummaryWriter
 
 
 model_names = sorted(name for name in models.__dict__
@@ -142,6 +143,9 @@ def main():
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
+
+    writer_tb = SummaryWriter(log_dir="/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/"
+                                      "board/{}_epochs/{}".format(args.epochs, args.model_name))
 
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
@@ -297,16 +301,24 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, args)
+        train_stats = train(train_loader, model, criterion, optimizer, epoch, device, args)
+
+        print('Writing TB Train, epoch {}\n'.format(epoch))
+        writer_tb.add_scalar('Loss/Val_Loss', train_stats['loss'], epoch)
+        writer_tb.add_scalar('Top1/Val_Top1', train_stats['top1'], epoch)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
-        
+        val_stats = validate(val_loader, model, criterion, args)
+
+        print('Writing TB Val, epoch {}\n'.format(epoch))
+        writer_tb.add_scalar('Loss/Val_Loss', val_stats['loss'], epoch)
+        writer_tb.add_scalar('Top1/Val_Top1', val_stats['top1'], epoch)
+
         scheduler.step()
         
         # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
+        is_best = val_results['acc1'] > best_acc1
+        best_acc1 = max(val_results['acc1'], best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -368,6 +380,8 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+
+    return {'loss': losses.avg, 'acc1': top1.avg}
 
 
 def validate(val_loader, model, criterion, args):
@@ -438,7 +452,7 @@ def validate(val_loader, model, criterion, args):
 
     progress.display_summary()
 
-    return top1.avg
+    return {'loss': losses.avg, 'acc1': top1.avg}
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
