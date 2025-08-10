@@ -28,8 +28,8 @@ model_names = sorted(name for name in models.__dict__
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR', nargs='?', default='imagenet',
-                    help='path to dataset (default: imagenet)')
+parser.add_argument('data', metavar='DIR', nargs='?', default='/home/projects/bagon/shared/imagenet',
+                    help='path to imagenet dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet101',
                     choices=model_names,
                     help='model architecture: ' +
@@ -200,7 +200,6 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         model.to(device)
 
-
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
 
@@ -234,7 +233,6 @@ def main_worker(gpu, ngpus_per_node, args):
                   .format(resume_checkpoint_file, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(resume_checkpoint_file))
-
 
     # Data loading code
     if args.dummy:
