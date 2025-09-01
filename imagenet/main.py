@@ -314,14 +314,14 @@ def main_worker(gpu, ngpus_per_node, args):
 
         print('Writing TB Train, epoch {}\n'.format(epoch))
         writer_tb.add_scalar('Loss/Val_Loss', train_stats['loss'], epoch)
-        writer_tb.add_scalar('Top1/Val_Top1', train_stats['top1'], epoch)
+        writer_tb.add_scalar('Top1/Val_Top1', train_stats['acc1'], epoch)
 
         # evaluate on validation set
         val_stats = validate(val_loader, model, criterion, args)
 
         print('Writing TB Val, epoch {}\n'.format(epoch))
         writer_tb.add_scalar('Loss/Val_Loss', val_stats['loss'], epoch)
-        writer_tb.add_scalar('Top1/Val_Top1', val_stats['top1'], epoch)
+        writer_tb.add_scalar('Top1/Val_Top1', val_stats['acc1'], epoch)
 
         scheduler.step()
         
