@@ -57,7 +57,8 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=100, type=int,
                     metavar='N', help='print frequency (default: 10. IN: changed to 100)')
-parser.add_argument('--resume', default='code/examples_imagenet/imagenet/out', type=str, metavar='PATH',
+parser.add_argument('--resume', default='/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/out',
+                    type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none. IN: changed to out directory)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
