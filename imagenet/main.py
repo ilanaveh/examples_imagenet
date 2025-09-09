@@ -23,6 +23,7 @@ from torch.utils.data import Subset
 from PIL import ImageFilter  # IN: for GaussianBlur
 from tensorboardX import SummaryWriter
 import random  # for GaussianBlurRand
+from pathlib import Path
 
 
 model_names = sorted(name for name in models.__dict__
@@ -221,15 +222,17 @@ def main_worker(gpu, ngpus_per_node, args):
     
     # optionally resume from a checkpoint
     if args.resume:
-        resume_checkpoint_file = os.path.join(args.resume, args.model_name, 'checkpoint.pth.tar')
+        output_dir = Path(args.resume) / args.model_name
+        output_dir.mkdir(parents=False, exist_ok=True)  # create if doesn't exist, alert if parent doesn't exist.
+        resume_checkpoint_file = os.path.join(output_dir, 'checkpoint.pth.tar')
         if os.path.isfile(resume_checkpoint_file):
             print("=> loading checkpoint '{}'".format(resume_checkpoint_file))
             if args.gpu is None:
-                checkpoint = torch.load(args.resume)
+                checkpoint = torch.load(resume_checkpoint_file)
             else:
                 # Map model to be loaded to specified single gpu.
                 loc = f'{device.type}:{args.gpu}'
-                checkpoint = torch.load(args.resume, map_location=loc)
+                checkpoint = torch.load(resume_checkpoint_file, map_location=loc)
             args.start_epoch = checkpoint['epoch']
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
@@ -329,6 +332,9 @@ def main_worker(gpu, ngpus_per_node, args):
         # remember best acc@1 and save checkpoint
         is_best = val_stats['acc1'] > best_acc1
         best_acc1 = max(val_stats['acc1'], best_acc1)
+
+        if is_best:
+            print(f"New best top-1 accuracy! (epoch{epoch}, acc1={best_acc1})")
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
@@ -469,7 +475,7 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     print(f'Saving checkpoint (epoch {state["epoch"]}) at: {filename}')
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, filename.replace('checkpoint', 'model_best'))
 
 
 class Summary(Enum):
