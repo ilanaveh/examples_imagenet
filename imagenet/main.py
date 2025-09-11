@@ -87,15 +87,22 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
 # IN: added arguments for training with blurry inputs (and blur_max for variable-blur training)
 parser.add_argument('--blur', default=0, type=int, help="blur level for training")
-parser.add_argument('--blur_max', default=None, type=int,help='For Variable-Blur training: max sigma')  # IN: add blur argument
+parser.add_argument('--blur_max', default=None, type=int, help='For Variable-Blur training: max sigma')
+parser.add_argument('--suf', default='', type=str, help='Suffix for model name')
+parser.add_argument('--tb_subdir', default='', type=str,
+                    help='If tensorboard file should be saved in subdir within X_epochs')
 
 best_acc1 = 0
 
 
 def main():
+    is_db = torch.cuda.device_count() == 1
     args = parser.parse_args()
     args.model_name = f'train_resnet_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
+    args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
+    args.model_name = args.model_name + '_db' if is_db else args.model_name
+
     print(f"~~~{args.model_name}~~~")
 
     if args.seed is not None:
@@ -150,8 +157,11 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
-    writer_tb = SummaryWriter(log_dir="/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/"
-                                      "board/{}_epochs/{}".format(args.epochs, args.model_name))
+    tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/board/{}_epochs".format(args.epochs)
+    tb_dir = os.path.join(tb_dir, args.tb_subdir) if args.tb_subdir else tb_dir
+    writer_tb = SummaryWriter(log_dir=os.path.join(tb_dir, args.model_name))
+
+    print("Tensorboard saved at: {}".format(os.path.join(tb_dir, args.model_name)))
 
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
@@ -275,14 +285,19 @@ def main_worker(gpu, ngpus_per_node, args):
             ]
         }
 
-        if args.blur:
+        if args.blur or args.blur_max:
+            transforms_fin = {}
             if args.blur_max:
+
                 blur_transform = GaussianBlurRand(int(args.blur), int(args.blur_max))
+                max_blur_transform = GaussianBlur(int(args.blur_max))  # for validation
+                transforms_fin['val'] = transforms.Compose([max_blur_transform] + post_blur_transforms['val'])
             else:
                 blur_transform = GaussianBlur(int(args.blur))
+                transforms_fin['val'] = transforms.Compose([blur_transform] + post_blur_transforms['val'])
 
-            transforms_fin = {X: transforms.Compose([blur_transform] + post_blur_transforms[X])
-                              for X in ['train', 'val']}
+            transforms_fin['train'] = transforms.Compose([blur_transform] + post_blur_transforms['train'])
+
         else:
             transforms_fin = {X: transforms.Compose(post_blur_transforms[X]) for X in ['train', 'val']}
 
@@ -317,8 +332,8 @@ def main_worker(gpu, ngpus_per_node, args):
         train_stats = train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         print('Writing TB Train, epoch {}\n'.format(epoch))
-        writer_tb.add_scalar('Loss/Val_Loss', train_stats['loss'], epoch)
-        writer_tb.add_scalar('Top1/Val_Top1', train_stats['acc1'], epoch)
+        writer_tb.add_scalar('Loss/Train_Loss', train_stats['loss'], epoch)
+        writer_tb.add_scalar('Top1/Train_Top1', train_stats['acc1'], epoch)
 
         # evaluate on validation set
         val_stats = validate(val_loader, model, criterion, args)
@@ -334,7 +349,7 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(val_stats['acc1'], best_acc1)
 
         if is_best:
-            print(f"New best top-1 accuracy! (epoch{epoch}, acc1={best_acc1})")
+            print(f"New best top-1 accuracy! (epoch {epoch}, acc1={best_acc1})")
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
