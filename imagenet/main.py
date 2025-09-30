@@ -193,7 +193,8 @@ def main_worker(gpu, ngpus_per_node, args):
         model = models.__dict__[args.arch]()
 
         if args.conv1_ker_size is not None:
-            print("=> Changing conv1 kernel size to: {}".format(args.conv1_ker_size))
+            ori_conv1_ker_size = model.conv1.weight.shape[-1]
+            print("=> Changing conv1 kernel size from: {}, to: {}".format(ori_conv1_ker_size, args.conv1_ker_size))
             model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
                                     stride=(2, 2), padding=int((args.conv1_ker_size-1)/2), bias=False)
 
