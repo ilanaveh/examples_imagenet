@@ -91,6 +91,8 @@ parser.add_argument('--blur_max', default=None, type=int, help='For Variable-Blu
 parser.add_argument('--suf', default='', type=str, help='Suffix for model name')
 parser.add_argument('--tb_subdir', default='', type=str,
                     help='If tensorboard file should be saved in subdir within X_epochs')
+# IN: Add argument for changing kernel size of first convolutional layer, for reliable RF analysis (ref: Pawan 2018)
+parser.add_argument('--conv1_ker_size', default=None, type=int, help='If not None, changes size of conv1 kernel.')
 
 best_acc1 = 0
 
@@ -101,6 +103,7 @@ def main():
     args.model_name = f'train_resnet_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
+    args.model_name = args.model_name + '_{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
     print(f"~~~{args.model_name}~~~")
@@ -188,6 +191,11 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
+
+        if args.conv1_ker_size is not None:
+            print("=> Changing conv1 kernel size to: {}".format(args.conv1_ker_size))
+            model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
+                                    stride=(2, 2), padding=int((args.conv1_ker_size-1)/2), bias=False)
 
     if not use_accel:
         print('using CPU, this will be slow')
