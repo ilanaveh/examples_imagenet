@@ -103,7 +103,7 @@ def main():
     args.model_name = f'train_resnet_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
-    args.model_name = args.model_name + '_{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
+    args.model_name = args.model_name + '_ker{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
     print(f"~~~{args.model_name}~~~")
