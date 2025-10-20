@@ -14,21 +14,7 @@ import os
 
 
 model_blur = '0'
-# ------------------------------
-# 1. Load trained model
-# ------------------------------
-checkpoint_dir = '/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/out/New'
-cp_pth = os.path.join(checkpoint_dir, f'train_resnet_blur{model_blur}', 'model_best.pth.tar')
-model = models.resnet101()  # initialize base architecture
-model = nn.DataParallel(model)
-checkpoint = torch.load(cp_pth, map_location="cpu")
-
-model.load_state_dict(checkpoint['state_dict'])  # load trained weights
-model = model.module
-model.eval()
-
-weights = model.conv1.weight.data.cpu().numpy()  # [64, 3, 7, 7]
-rf_maps = weights.mean(axis=1)  # [64, 7, 7]
+ker_size = 22  # size of conv1 kernel (original is 7)
 
 
 # ------------------------------
@@ -67,6 +53,7 @@ def extreme_points(mask):
     i, j = np.unravel_index(dists.argmax(), dists.shape)
     return coords[i], coords[j]
 
+
 # ------------------------------
 # 3. Analysis function
 # ------------------------------
@@ -101,53 +88,112 @@ def analyze_rf(kernel, thresh_factor=0.3):
 
     return rf_metric, ellipses
 
-# ------------------------------
-# 4. Compute metrics
-# ------------------------------
-metrics, ellipses_all = [], []
-for rf in rf_maps:
-    m, e = analyze_rf(rf)
-    metrics.append(m)
-    ellipses_all.append(e)
 
-# ------------------------------
-# 5. Select top-N by std
-# ------------------------------
-stds = rf_maps.reshape(len(rf_maps), -1).std(axis=1)
-sorted_idx = np.argsort(stds)[::-1]
-topN = 15
-selected = sorted_idx[:topN]
+def filter_bw(weights, thresh=.4):
+    w_filt = []
+    for w in weights:
+        k = 0
+        t = 0
 
-# ------------------------------
-# 6. Plot kernels with ellipses
-# ------------------------------
-cols = 5
-rows = int(np.ceil(topN / cols))
-plt.figure(figsize=(cols*3, rows*3))
+        w_min, w_max = w.min(), w.max()
+        w_norm = (w - w_min) / (w_max - w_min)
 
-for i, idx in enumerate(selected):
-    rf = rf_maps[idx]
-    m = metrics[idx]
-    ellipses = ellipses_all[idx]
+        for x in range(ker_size):
+            for y in range(ker_size):
+                cur_w = w_norm[:, y, x]
+                if any(abs(np.append(np.diff(cur_w), cur_w[0] - cur_w[-1])) > thresh):
+                    k += 1
+                t += 1
+        if k == 0:
+            w_filt.append(w)
 
-    plt.subplot(rows, cols, i+1)
-    plt.imshow(rf, cmap="bwr", vmin=-np.max(np.abs(rf)), vmax=np.max(np.abs(rf)))
+    return torch.stack(w_filt).numpy()
 
-    if "pos" in ellipses:
-        center, axes, angle, _ = ellipses["pos"]
-        ellipse = plt.matplotlib.patches.Ellipse(center, *axes, angle=angle,
-                                                 edgecolor="green", facecolor="none", lw=1)
-        plt.gca().add_patch(ellipse)
-    if "neg" in ellipses:
-        center, axes, angle, _ = ellipses["neg"]
-        ellipse = plt.matplotlib.patches.Ellipse(center, *axes, angle=angle,
-                                                 edgecolor="red", facecolor="none", lw=1)
-        plt.gca().add_patch(ellipse)
 
-    title = f"K{idx} RF={m:.2f}" if m else f"K{idx} no fit"
-    plt.title(title, fontsize=9)
-    plt.axis("off")
+def main():
+    # ------------------------------
+    # 1. Load trained model
+    # ------------------------------
+    checkpoint_dir = '/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/out/New'
+    model_name = f'train_resnet_blur{model_blur}_ker{ker_size}' if (ker_size != 7) else f'train_resnet_blur{model_blur}'
+    cp_pth = os.path.join(checkpoint_dir, model_name, 'model_best.pth.tar')
+    model = models.resnet101()  # initialize base architecture
 
-plt.suptitle(f"Top-{topN} kernels with ellipse fits", fontsize=14)
-plt.tight_layout()
-plt.show()
+    if ker_size != 7:
+        ori_conv1_ker_size = model.conv1.weight.shape[-1]
+        print("=> Changing conv1 kernel size from: {}, to: {}".format(ori_conv1_ker_size, ker_size))
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=(ker_size, ker_size),
+                                stride=(2, 2), padding=int((ker_size - 1) / 2), bias=False)
+
+    model = nn.DataParallel(model)
+    checkpoint = torch.load(cp_pth, map_location="cpu")
+
+    model.load_state_dict(checkpoint['state_dict'])  # load trained weights
+    model = model.module
+    model.eval()
+
+    weights = model.conv1.weight.data.cpu()  # [64, 3, ker_size, ker_size] ker_size=7 for original model.
+    weights = filter_bw(weights)
+    rf_maps = weights.mean(axis=1)  # [64, ker_size, ker_size]
+
+    # ------------------------------
+    # 2. Compute metrics
+    # ------------------------------
+    metrics, ellipses_all = [], []
+    for rf in rf_maps:
+        m, e = analyze_rf(rf)
+        metrics.append(m)
+        ellipses_all.append(e)
+
+    # ------------------------------
+    # 3. Keep only kernels where both ellipses were successfully fitted
+    # ------------------------------
+    valid_idx = [i for i, e in enumerate(ellipses_all) if "pos" in e and "neg" in e]
+
+    print(f"{len(valid_idx)} of {len(rf_maps)} kernels had valid ellipse fits.")
+
+    # Option A: simply visualize all valid ones
+    selected = valid_idx
+
+    # Option B: rank the valid ones by std if you still want top-N
+    topN = 15
+    stds = rf_maps.reshape(len(rf_maps), -1).std(axis=1)
+    selected = sorted(valid_idx, key=lambda i: stds[i], reverse=True)[:topN]
+
+    # ------------------------------
+    # 4. Plot kernels with ellipses
+    # ------------------------------
+    cols = 5
+    rows = int(np.ceil(len(selected) / cols))
+    plt.figure(figsize=(cols*3, rows*3))
+
+    for i, idx in enumerate(selected):
+        rf = rf_maps[idx]
+        m = metrics[idx]
+        ellipses = ellipses_all[idx]
+
+        plt.subplot(rows, cols, i+1)
+        plt.imshow(rf, cmap="bwr", vmin=-np.max(np.abs(rf)), vmax=np.max(np.abs(rf)))
+
+        if "pos" in ellipses:
+            center, axes, angle, _ = ellipses["pos"]
+            ellipse = plt.matplotlib.patches.Ellipse(center, *axes, angle=angle,
+                                                     edgecolor="green", facecolor="none", lw=1)
+            plt.gca().add_patch(ellipse)
+        if "neg" in ellipses:
+            center, axes, angle, _ = ellipses["neg"]
+            ellipse = plt.matplotlib.patches.Ellipse(center, *axes, angle=angle,
+                                                     edgecolor="red", facecolor="none", lw=1)
+            plt.gca().add_patch(ellipse)
+
+        title = f"K{idx} RF={m:.2f}" if m else f"K{idx} no fit"
+        plt.title(title, fontsize=9)
+        plt.axis("off")
+
+    plt.suptitle(f"Top-{topN} kernels with ellipse fits", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == '__main__':
+    main()
