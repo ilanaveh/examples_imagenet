@@ -102,8 +102,8 @@ def main():
     args = parser.parse_args()
     args.model_name = f'train_resnet_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
-    args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
     args.model_name = args.model_name + '_ker{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
+    args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
     print(f"~~~{args.model_name}~~~")
@@ -194,9 +194,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if args.conv1_ker_size is not None:
             ori_conv1_ker_size = model.conv1.weight.shape[-1]
-            print("=> Changing conv1 kernel size from: {}, to: {}".format(ori_conv1_ker_size, args.conv1_ker_size))
+            print(f"=> Changing conv1 kernel size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}, "
+                  f"and stride from 2 to 1")
             model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
-                                    stride=(2, 2), padding=int((args.conv1_ker_size-1)/2), bias=False)
+                                    stride=(1, 1), padding=int((args.conv1_ker_size-1)/2), bias=False)
 
     if not use_accel:
         print('using CPU, this will be slow')
