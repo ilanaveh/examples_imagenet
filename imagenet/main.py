@@ -259,7 +259,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 # Map model to be loaded to specified single gpu.
                 loc = f'{device.type}:{args.gpu}'
                 checkpoint = torch.load(resume_checkpoint_file, map_location=loc)
-            args.start_epoch = checkpoint['epoch']
+            args.start_epoch = checkpoint['epoch'] + 1
             best_acc1 = checkpoint['best_acc1']
             if args.gpu is not None:
                 # best_acc1 may be from a checkpoint from a different GPU
@@ -371,7 +371,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 and args.rank % ngpus_per_node == 0):
             save_checkpoint_file_name = resume_checkpoint_file if args.resume else 'checkpoint.pth.tar'
             save_checkpoint({
-                'epoch': epoch + 1,
+                'epoch': epoch,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
