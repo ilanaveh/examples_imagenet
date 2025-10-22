@@ -93,6 +93,7 @@ parser.add_argument('--tb_subdir', default='', type=str,
                     help='If tensorboard file should be saved in subdir within X_epochs')
 # IN: Add argument for changing kernel size of first convolutional layer, for reliable RF analysis (ref: Pawan 2018)
 parser.add_argument('--conv1_ker_size', default=None, type=int, help='If not None, changes size of conv1 kernel.')
+parser.add_argument('--conv1_stride', default=None, type=int, help='If not None, changes stride of conv1 kernel.')
 
 best_acc1 = 0
 
@@ -103,6 +104,7 @@ def main():
     args.model_name = f'train_resnet_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
     args.model_name = args.model_name + '_ker{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
+    args.model_name = args.model_name + '_stride{}'.format(args.conv1_stride) if args.conv1_stride else args.model_name
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
@@ -194,10 +196,14 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if args.conv1_ker_size is not None:
             ori_conv1_ker_size = model.conv1.weight.shape[-1]
-            print(f"=> Changing conv1 kernel size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}, "
-                  f"and stride from 2 to 1")
+            print(f"=> Changing conv1 kernel size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
+            if args.conv1_stride is not None:
+                stride = args.conv1_stride
+                print(f"=> Changing conv1 stride from 2 to {args.conv1_stride}")
+            else:
+                stride = 2
             model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
-                                    stride=(1, 1), padding=int((args.conv1_ker_size-1)/2), bias=False)
+                                    stride=(stride, stride), padding=int((args.conv1_ker_size-1)/2), bias=False)
 
     if not use_accel:
         print('using CPU, this will be slow')
