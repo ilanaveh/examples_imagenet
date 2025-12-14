@@ -1,3 +1,8 @@
+"""
+10/12/25
+Add Attention-based distillation to training
+"""
+
 import argparse
 import os
 import random
@@ -57,7 +62,8 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=100, type=int,
                     metavar='N', help='print frequency (default: 10. IN: changed to 100)')
-parser.add_argument('--resume', default='/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/out',
+parser.add_argument('--resume',
+                    default='/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/attention_KD/out',
                     type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none. IN: changed to out directory)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
@@ -93,8 +99,47 @@ parser.add_argument('--tb_subdir', default='', type=str,
 # IN: Add argument for changing kernel size of first convolutional layer, for reliable RF analysis (ref: Pawan 2018)
 parser.add_argument('--conv1_ker_size', default=None, type=int, help='If not None, changes size of conv1 kernel.')
 parser.add_argument('--conv1_stride', default=None, type=int, help='If not None, changes stride of conv1 kernel.')
+# 10/12/25: Add Arguments for distillation:
+parser.add_argument('--tchr_path', default=None, type=str, help='Path to teacher model (typically high-res)')
+parser.add_argument('--alpha', default=1.0, type=float, help='Alpha parameter for KD loss')
+parser.add_argument('--kd_layers', default=[1, 2, 3, 4], type=int, nargs='+',
+                    help='Resnet layers for attention-transfer; choose from [1, 2, 3, 4]')
 
 best_acc1 = 0
+
+
+# =========================
+# Attention Distillation Utils
+# =========================
+
+class FeatureHook:
+    def __init__(self):
+        self.features = None
+
+    def __call__(self, module, input, output):
+        self.features = output
+
+    def clear(self):
+        self.features = None
+
+
+def attention_map(feat):
+    # feat: B x C x H x W
+    return feat.pow(2).mean(dim=1, keepdim=True)
+
+
+def normalize_attention(att):
+    att = att.view(att.size(0), -1)
+    return torch.nn.functional.normalize(att, p=2, dim=1)
+
+
+def attention_distill_loss(student_feats, teacher_feats):
+    loss = 0.
+    for fs, ft in zip(student_feats, teacher_feats):
+        As = normalize_attention(attention_map(fs))
+        At = normalize_attention(attention_map(ft))
+        loss += torch.nn.functional.mse_loss(As, At)
+    return loss
 
 
 def main():
@@ -104,6 +149,10 @@ def main():
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
     args.model_name = args.model_name + '_ker{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
     args.model_name = args.model_name + '_stride{}'.format(args.conv1_stride) if args.conv1_stride else args.model_name
+    args.model_name = args.model_name + '_KD' if args.tchr_path else args.model_name
+    args.model_name = args.model_name + '_alpha{}'.format(args.alpha) if args.tchr_path else args.model_name
+    args.model_name = args.model_name + '_lyrs{}'.format(''.join(str(l) for l in args.kd_layers)) if args.tchr_path \
+        else args.model_name
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
@@ -162,7 +211,8 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
-    tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/board/{}_epochs".format(args.epochs)
+    tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/attention_KD/board/{}_epochs".format(
+        args.epochs)
     tb_dir = os.path.join(tb_dir, args.tb_subdir) if args.tb_subdir else tb_dir
     writer_tb = SummaryWriter(log_dir=os.path.join(tb_dir, args.model_name))
 
@@ -196,7 +246,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if args.conv1_ker_size is not None:
             ori_conv1_ker_size = model.conv1.weight.shape[-1]
-            print(f"=> Changing conv1 kernel size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
+            print(f"=> Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
             if args.conv1_stride is not None:
                 stride = args.conv1_stride
                 print(f"=> Changing conv1 stride from 2 to {args.conv1_stride}")
@@ -204,6 +254,71 @@ def main_worker(gpu, ngpus_per_node, args):
                 stride = 2
             model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
                                     stride=(stride, stride), padding=int((args.conv1_ker_size - 1) / 2), bias=False)
+
+    # =========================
+    # Load Teacher Model
+    # =========================
+    use_kd = False
+    if args.tchr_path:
+        tchr_file = os.path.join(args.tchr_path, 'model_best.pth.tar')
+        if os.path.isfile(tchr_file):
+            use_kd = True
+            print(f"Creating teacher model: {tchr_file}")
+            tchr_model = models.__dict__[args.arch]()
+            if args.conv1_ker_size is not None:
+                ori_conv1_ker_size = tchr_model.conv1.weight.shape[-1]
+                print(f"=> Teacher model: Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
+                if args.conv1_stride is not None:
+                    stride = args.conv1_stride
+                    print(f"=> Teacher model: Changing conv1 stride from 2 to {args.conv1_stride}")
+                else:
+                    stride = 2
+                tchr_model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
+                                             stride=(stride, stride), padding=int((args.conv1_ker_size - 1) / 2),
+                                             bias=False)
+            if use_accel and args.distributed:
+                # For multiprocessing distributed, DistributedDataParallel constructor
+                # should always set the single device scope, otherwise,
+                # DistributedDataParallel will use all available devices.
+                if device.type == 'cuda':
+                    if args.gpu is not None:
+                        torch.cuda.set_device(args.gpu)
+                        tchr_model.cuda(device)
+                        tchr_model = torch.nn.parallel.DistributedDataParallel(tchr_model, device_ids=[args.gpu])
+                    else:
+                        tchr_model.cuda()
+                        # DistributedDataParallel will divide and allocate batch_size to all
+                        # available GPUs if device_ids are not set
+                        tchr_model = torch.nn.parallel.DistributedDataParallel(tchr_model)
+            elif device.type == 'cuda':
+                # DataParallel will divide and allocate batch_size to all available GPUs
+                tchr_model = torch.nn.DataParallel(tchr_model).cuda()
+            else:
+                tchr_model.to(device)
+
+            if args.gpu is None:
+                tchr_checkpoint = torch.load(tchr_file)
+            else:
+                # Map model to be loaded to specified single gpu.
+                loc = f'{device.type}:{args.gpu}'
+                tchr_checkpoint = torch.load(tchr_file, map_location=loc)
+            tchr_best_epoch = tchr_checkpoint['epoch']
+            tchr_best_acc1 = tchr_checkpoint['best_acc1']
+            tchr_model.load_state_dict(tchr_checkpoint['state_dict'])
+            tchr_model = tchr_model.module
+            print(f"=> Teacher model: loaded checkpoint (epoch {tchr_best_epoch}, acc1: {tchr_best_acc1})")
+
+            tchr_model.eval()
+
+            # Freeze teacher
+            for p in tchr_model.parameters():
+                p.requires_grad = False
+
+        else:
+            print("=> Teacher model: no checkpoint found at '{}' => Not using distillation.".format(tchr_file))
+            tchr_model = None
+    else:
+        print("=> No Teacher path given => Not using distillation.")
 
     if not use_accel:
         print('using CPU, this will be slow')
@@ -335,6 +450,27 @@ def main_worker(gpu, ngpus_per_node, args):
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
+    # =========================
+    # Add hooks for distillation
+    # =========================
+    tchr_hooks = []
+    stdnt_hooks = []
+
+    def get_last_conv(model, layer_idx):
+        block = getattr(model, f'layer{layer_idx}')[-1]
+        return block.conv3 if hasattr(block, 'conv3') else block.conv2
+
+    if use_kd:
+        for i in args.kd_layers:
+            ht = FeatureHook()
+            hs = FeatureHook()
+
+            get_last_conv(tchr_model, i).register_forward_hook(ht)
+            get_last_conv(model.module, i).register_forward_hook(hs)
+
+            tchr_hooks.append(ht)
+            stdnt_hooks.append(hs)
+
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
@@ -344,7 +480,8 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train_stats = train(train_loader, model, criterion, optimizer, epoch, device, args)
+        train_stats = train(train_loader, model, criterion, optimizer, epoch, device, args,
+                            tchr_model, tchr_hooks, stdnt_hooks)
 
         print('Writing TB Train, epoch {}\n'.format(epoch))
         writer_tb.add_scalar('Loss/Train_Loss', train_stats['loss'], epoch)
@@ -379,7 +516,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best, filename=save_checkpoint_file_name)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, args):
+def train(train_loader, model, criterion, optimizer, epoch, device, args, tchr_model, tchr_hooks, stdnt_hooks):
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
     batch_time = AverageMeter('Time', use_accel, ':6.3f', Summary.NONE)
@@ -404,9 +541,30 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        # compute output
+        # teacher forward (no grad)
+        if tchr_model:
+            with torch.no_grad():
+                tchr_model(images)
+
+        # student forward
         output = model(images)
-        loss = criterion(output, target)
+
+        # Original loss
+        cls_loss = criterion(output, target)
+
+        # KD loss
+        if tchr_model:
+            att_loss = attention_distill_loss(
+                [h.features for h in stdnt_hooks],
+                [h.features for h in tchr_hooks]
+            )
+
+            # Combined weighted loss
+            loss = cls_loss + args.alpha * att_loss
+
+            print(cls_loss.item(), att_loss.item())
+        else:
+            loss = cls_loss
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -418,6 +576,11 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # clear hooks after each step
+        if tchr_model:
+            for h in tchr_hooks + stdnt_hooks:
+                h.clear()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
