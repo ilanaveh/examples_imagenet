@@ -24,21 +24,30 @@ from PIL import ImageFilter  # IN: for GaussianBlur
 from tensorboardX import SummaryWriter
 import random  # for GaussianBlurRand
 from pathlib import Path
+from custom_datasets import AffectnetDataset
 
 model_names = sorted(name for name in models.__dict__
                      if name.islower() and not name.startswith("__")
                      and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR', nargs='?', default='/home/projects/bagon/shared/imagenet',
-                    help='path to imagenet dataset')
+parser = argparse.ArgumentParser(description='ImageNet Downstream Training (Faces Tasks)')
+parser.add_argument('--data-set', default='Affectnet',
+                        choices=['Affectnet', 'CelebA'],
+                        type=str, help='Image Net dataset path')
+parser.add_argument('data', metavar='DIR', nargs='?', default='/home/projects/bagon/ilanaveh/data/AffectNet',
+                    help='path to downstream dataset')
+parser.add_argument('--desired_classes', default=[0, 1, 2, 3, 4, 5, 6, 7], type=int, nargs='+',
+                        help='0: Neutral, 1: Happiness, 2: Sadness, 3: Surprise, 4: Fear, 5: Disgust, 6: Anger, '
+                             '7: Contempt, 8: None, 9: Uncertain, 10: No-Face.ToDo: decide which classes I want.')
+parser.add_argument('--balance_clss', action='store_true',
+                    help='whether to take the same number of images from each class (relevant for Affectnet)')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet101',
                     choices=model_names,
                     help='model architecture: ' +
                          ' | '.join(model_names) +
                          ' (default: resnet18. IN: changed to resnet101)')
-parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
-                    help='number of data loading workers (default: 4. IN: changed to 8)')
+parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+                    help='number of data loading workers (default: 4.)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -57,7 +66,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=100, type=int,
                     metavar='N', help='print frequency (default: 10. IN: changed to 100)')
-parser.add_argument('--resume', default='/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/out',
+parser.add_argument('--resume', default='/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/downstream/out',
                     type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none. IN: changed to out directory)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
@@ -93,6 +102,11 @@ parser.add_argument('--tb_subdir', default='', type=str,
 # IN: Add argument for changing kernel size of first convolutional layer, for reliable RF analysis (ref: Pawan 2018)
 parser.add_argument('--conv1_ker_size', default=None, type=int, help='If not None, changes size of conv1 kernel.')
 parser.add_argument('--conv1_stride', default=None, type=int, help='If not None, changes stride of conv1 kernel.')
+# IN 8/12/25: Add argument for starting from trained imagenet model:
+parser.add_argument('--imagenet_model_dir', default='out', type=str,
+                    help='directory (within "imagenet") of imagenet model')
+parser.add_argument('--imagenet_model_name', default=None, type=str,
+                        help='model name, or None for original (pretrained or not, according to args.pretrained)')
 
 best_acc1 = 0
 
@@ -100,8 +114,13 @@ best_acc1 = 0
 def main():
     is_db = torch.cuda.device_count() == 1
     args = parser.parse_args()
-    args.model_name = f'train_resnet_blur{args.blur}'
+    n_cls = len(args.desired_classes)
+    imagenet_model_blur = args.imagenet_model_name.split('blur')[1].split('_')[0] if args.imagenet_model_name else ''
+    args.model_name = f'finetune_resnet_blur{imagenet_model_blur}' if args.imagenet_model_name \
+        else "finetune_resnet_original"
+    args.model_name = args.model_name + f'_{args.data_set}_blur{args.blur}'
     args.model_name = args.model_name + '-{}'.format(args.blur_max) if args.blur_max else args.model_name
+    args.model_name = args.model_name + '_{}cls'.format(n_cls) if (n_cls > 2) else args.model_name
     args.model_name = args.model_name + '_ker{}'.format(args.conv1_ker_size) if args.conv1_ker_size else args.model_name
     args.model_name = args.model_name + '_stride{}'.format(args.conv1_stride) if args.conv1_stride else args.model_name
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
@@ -162,7 +181,9 @@ def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
 
-    tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/board/{}_epochs".format(args.epochs)
+    n_cls = len(args.desired_classes)
+
+    tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/downstream/board/{}_epochs".format(args.epochs)
     tb_dir = os.path.join(tb_dir, args.tb_subdir) if args.tb_subdir else tb_dir
     writer_tb = SummaryWriter(log_dir=os.path.join(tb_dir, args.model_name))
 
@@ -236,6 +257,18 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         model.to(device)
 
+    # Load trained checkpoint:
+    if args.imagenet_model_name:
+        imagenet_model_path = os.path.join('/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet',
+                                           args.imagenet_model_dir, args.imagenet_model_name)
+
+        imagenet_checkpoint = torch.load(os.path.join(imagenet_model_path, 'model_best.pth.tar'),
+                                         map_location='cpu')
+
+        model.load_state_dict(imagenet_checkpoint['state_dict'])
+
+        print(f"=> Starting from imagenet model: '{imagenet_model_path}', epoch: {imagenet_checkpoint['epoch']}")
+
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
 
@@ -272,13 +305,15 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> no checkpoint found at '{}'".format(resume_checkpoint_file))
 
     # Data loading code
+    print(f"=> Creating dataset: {args.data_set}, with {n_cls} classes: {args.desired_classes}")
     if args.dummy:
         print("=> Dummy data is used!")
         train_dataset = datasets.FakeData(1281167, (3, 224, 224), 1000, transforms.ToTensor())
         val_dataset = datasets.FakeData(50000, (3, 224, 224), 1000, transforms.ToTensor())
     else:
-        traindir = os.path.join(args.data, 'train')
-        valdir = os.path.join(args.data, 'val')
+        # these are the directories for Affectnet. Need to change if using other downstream datasets:
+        traindir = os.path.join(args.data, 'train_set')
+        valdir = os.path.join(args.data, 'val_set')
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                          std=[0.229, 0.224, 0.225])
 
@@ -316,9 +351,9 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             transforms_fin = {X: transforms.Compose(post_blur_transforms[X]) for X in ['train', 'val']}
 
-        train_dataset = datasets.ImageFolder(traindir, transforms_fin['train'])
-
-        val_dataset = datasets.ImageFolder(valdir, transforms_fin['val'])
+        train_dataset = AffectnetDataset(traindir, transform=transforms_fin['train'], des_classes=args.desired_classes,
+                                         balance_clss=args.balance_clss)
+        val_dataset = AffectnetDataset(valdir, transform=transforms_fin['val'], des_classes=args.desired_classes)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
