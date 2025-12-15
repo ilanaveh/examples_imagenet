@@ -261,13 +261,17 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.imagenet_model_name:
         imagenet_model_path = os.path.join('/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet',
                                            args.imagenet_model_dir, args.imagenet_model_name)
+        if os.path.isfile(os.path.join(imagenet_model_path, 'model_best.pth.tar')):
+            imagenet_checkpoint = torch.load(os.path.join(imagenet_model_path, 'model_best.pth.tar'),
+                                             map_location='cpu')
 
-        imagenet_checkpoint = torch.load(os.path.join(imagenet_model_path, 'model_best.pth.tar'),
-                                         map_location='cpu')
+            model.load_state_dict(imagenet_checkpoint['state_dict'])
 
-        model.load_state_dict(imagenet_checkpoint['state_dict'])
-
-        print(f"=> Starting from imagenet model: '{imagenet_model_path}', epoch: {imagenet_checkpoint['epoch']}")
+            print(f"=> Starting from imagenet model: '{imagenet_model_path}', epoch: {imagenet_checkpoint['epoch']}")
+        else:
+            print(f"=> No checkpoint found at '{imagenet_model_path}' => Using original imagenet model")
+    else:
+        print(f"=> No imagenet path given => Using original imagenet model")
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
