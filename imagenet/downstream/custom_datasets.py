@@ -19,7 +19,7 @@ class AffectnetDataset(ImageFolder):
 
         super().__init__(root, loader=default_loader, transform=transform, target_transform=target_transform)
 
-    def make_dataset(self, directory, class_to_idx=None, extensions=None, is_valid_file=None):
+    def make_dataset(self, directory, class_to_idx=None, extensions=None, is_valid_file=None, allow_empty=False):
         """
         Override the make_dataset method, since Affectnet is not organized in sub-folders corresponding to classes.
         Original method (used by ImageFolder): /usr/local/lib/python3.10/dist-packages/torchvision/datasets/folder.py
