@@ -52,6 +52,7 @@ class AffectnetDataset(ImageFolder):
                     if (not self.balance_clss and not self.limit_dataset_size) \
                             or (track_num_ims_each_clss[ann] < target_num):
                         path = os.path.join(images_path, img)
+                        images.append((path, self.class_to_idx[ann]))
                         if self.balance_clss or self.limit_dataset_size:
                             track_num_ims_each_clss[ann] += 1
                             if np.all([v >= target_num for v in track_num_ims_each_clss.values()]):
