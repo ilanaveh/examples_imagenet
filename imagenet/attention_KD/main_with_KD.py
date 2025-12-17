@@ -156,8 +156,6 @@ def main():
     args.model_name = args.model_name + '_{}'.format(args.suf) if args.suf else args.model_name
     args.model_name = args.model_name + '_db' if is_db else args.model_name
 
-    print(f"~~~{args.model_name}~~~")
-
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -169,87 +167,58 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
-    if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
+    # --- torchrun / DDP detection ---
+    distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    if distributed:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
-    use_accel = not args.no_accel and torch.accelerator.is_available()
-
-    if use_accel:
-        device = torch.accelerator.current_accelerator()
+        dist.init_process_group(
+            backend=args.dist_backend,
+            init_method="env://"
+        )
     else:
-        device = torch.device("cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Using device: {device}")
+    args.distributed = distributed
 
-    if device.type == 'cuda':
-        ngpus_per_node = torch.accelerator.device_count()
-        if ngpus_per_node == 1 and args.dist_backend == "nccl":
-            warnings.warn(
-                "nccl backend >=2.5 requires GPU count>1, see https://github.com/NVIDIA/nccl/issues/103 perhaps use 'gloo'")
-    else:
-        ngpus_per_node = 1
+    is_main_process = (not args.distributed) or dist.get_rank() == 0
 
-    if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
+    print_if_main(f"~~~{args.model_name}~~~", is_main_process)
+
+    main_worker(device, args, is_main_process)
 
 
-def main_worker(gpu, ngpus_per_node, args):
+def main_worker(device, args, is_main_process):
     global best_acc1
-    args.gpu = gpu
 
     tb_dir = "/home/projects/bagon/ilanaveh/code/examples_imagenet/imagenet/attention_KD/board/{}_epochs".format(
         args.epochs)
     tb_dir = os.path.join(tb_dir, args.tb_subdir) if args.tb_subdir else tb_dir
-    writer_tb = SummaryWriter(log_dir=os.path.join(tb_dir, args.model_name))
 
-    print("Tensorboard saved at: {}".format(os.path.join(tb_dir, args.model_name)))
-
-    use_accel = not args.no_accel and torch.accelerator.is_available()
-
-    if use_accel:
-        if args.gpu is not None:
-            torch.accelerator.set_device_index(args.gpu)
-        device = torch.accelerator.current_accelerator()
+    if is_main_process:
+        writer_tb = SummaryWriter(log_dir=os.path.join(tb_dir, args.model_name))
+        print("=> Tensorboard saved at: {}".format(os.path.join(tb_dir, args.model_name)))
     else:
-        device = torch.device("cpu")
+        writer_tb = None
 
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
     # create model
     if args.pretrained:
-        print("=> using pre-trained model '{}'".format(args.arch))
+        print_if_main("=> Using pre-trained model '{}'".format(args.arch), is_main_process)
         model = models.__dict__[args.arch](pretrained=True)
     else:
-        print("=> creating model '{}'".format(args.arch))
+        print_if_main("=> Creating model '{}'".format(args.arch), is_main_process)
         model = models.__dict__[args.arch]()
 
         if args.conv1_ker_size is not None:
             ori_conv1_ker_size = model.conv1.weight.shape[-1]
-            print(f"=> Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
+            print_if_main(f"=> Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}",
+                          is_main_process)
             if args.conv1_stride is not None:
                 stride = args.conv1_stride
-                print(f"=> Changing conv1 stride from 2 to {args.conv1_stride}")
+                print_if_main(f"=> Changing conv1 stride from 2 to {args.conv1_stride}", is_main_process)
             else:
                 stride = 2
             model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
@@ -263,38 +232,25 @@ def main_worker(gpu, ngpus_per_node, args):
         tchr_file = os.path.join(args.tchr_path, 'model_best.pth.tar')
         if os.path.isfile(tchr_file):
             use_kd = True
-            print(f"Creating teacher model: {tchr_file}")
+            print_if_main(f"=> Creating teacher model: {tchr_file}", is_main_process)
             tchr_model = models.__dict__[args.arch]()
             if args.conv1_ker_size is not None:
                 ori_conv1_ker_size = tchr_model.conv1.weight.shape[-1]
-                print(f"=> Teacher model: Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}")
+                print_if_main(f"=> Teacher model: Changing conv1 ker size from: {ori_conv1_ker_size} to: {args.conv1_ker_size}",
+                      is_main_process)
                 if args.conv1_stride is not None:
                     stride = args.conv1_stride
-                    print(f"=> Teacher model: Changing conv1 stride from 2 to {args.conv1_stride}")
+                    print_if_main(f"=> Teacher model: Changing conv1 stride from 2 to {args.conv1_stride}", is_main_process)
                 else:
                     stride = 2
                 tchr_model.conv1 = nn.Conv2d(3, 64, kernel_size=(args.conv1_ker_size, args.conv1_ker_size),
                                              stride=(stride, stride), padding=int((args.conv1_ker_size - 1) / 2),
                                              bias=False)
-            if use_accel and args.distributed:
-                # For multiprocessing distributed, DistributedDataParallel constructor
-                # should always set the single device scope, otherwise,
-                # DistributedDataParallel will use all available devices.
-                if device.type == 'cuda':
-                    if args.gpu is not None:
-                        torch.cuda.set_device(args.gpu)
-                        tchr_model.cuda(device)
-                        tchr_model = torch.nn.parallel.DistributedDataParallel(tchr_model, device_ids=[args.gpu])
-                    else:
-                        tchr_model.cuda()
-                        # DistributedDataParallel will divide and allocate batch_size to all
-                        # available GPUs if device_ids are not set
-                        tchr_model = torch.nn.parallel.DistributedDataParallel(tchr_model)
-            elif device.type == 'cuda':
-                # DataParallel will divide and allocate batch_size to all available GPUs
-                tchr_model = torch.nn.DataParallel(tchr_model).cuda()
-            else:
-                tchr_model.to(device)
+
+            # Change to dataparallel, to enable loading from checkpoint:
+            tchr_model = torch.nn.DataParallel(tchr_model)
+
+            tchr_model.to(device)
 
             if args.gpu is None:
                 tchr_checkpoint = torch.load(tchr_file)
@@ -306,7 +262,8 @@ def main_worker(gpu, ngpus_per_node, args):
             tchr_best_acc1 = tchr_checkpoint['best_acc1']
             tchr_model.load_state_dict(tchr_checkpoint['state_dict'])
             tchr_model = tchr_model.module
-            print(f"=> Teacher model: loaded checkpoint (epoch {tchr_best_epoch}, acc1: {tchr_best_acc1})")
+            print_if_main(f"=> Teacher model: loaded checkpoint (epoch {tchr_best_epoch}, acc1: {tchr_best_acc1})",
+                  is_main_process)
 
             tchr_model.eval()
 
@@ -315,41 +272,29 @@ def main_worker(gpu, ngpus_per_node, args):
                 p.requires_grad = False
 
         else:
-            print("=> Teacher model: no checkpoint found at '{}' => Not using distillation.".format(tchr_file))
+            print_if_main("=> Teacher model: no checkpoint found at '{}' => Not using distillation.".format(tchr_file),
+                  is_main_process)
             tchr_model = None
     else:
-        print("=> No Teacher path given => Not using distillation.")
+        print_if_main("=> No Teacher path given => Not using distillation.", is_main_process)
 
-    if not use_accel:
-        print('using CPU, this will be slow')
-    elif args.distributed:
-        # For multiprocessing distributed, DistributedDataParallel constructor
-        # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if device.type == 'cuda':
-            if args.gpu is not None:
-                torch.cuda.set_device(args.gpu)
-                model.cuda(device)
-                # When using a single GPU per process and per
-                # DistributedDataParallel, we need to divide the batch size
-                # ourselves based on the total number of GPUs of the current node.
-                args.batch_size = int(args.batch_size / ngpus_per_node)
-                args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-            else:
-                model.cuda()
-                # DistributedDataParallel will divide and allocate batch_size to all
-                # available GPUs if device_ids are not set
-                model = torch.nn.parallel.DistributedDataParallel(model)
-    elif device.type == 'cuda':
-        # DataParallel will divide and allocate batch_size to all available GPUs
-        if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-            model.features = torch.nn.DataParallel(model.features)
-            model.cuda()
-        else:
-            model = torch.nn.DataParallel(model).cuda()
+    if args.distributed:
+        print_if_main("=> Using DistributedDataParallel (torchrun)", is_main_process)
+
+        # one process = one GPU
+        model = model.to(device)
+
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[device.index],
+            output_device=device.index,
+            find_unused_parameters=False
+        )
+
     else:
-        model.to(device)
+        # single-GPU fallback (NO DataParallel)
+        print("=> Using single GPU (no DataParallel)")
+        model = model.to(device)
 
     # define loss function (criterion), optimizer, and learning rate scheduler
     criterion = nn.CrossEntropyLoss().to(device)
@@ -367,7 +312,7 @@ def main_worker(gpu, ngpus_per_node, args):
         output_dir.mkdir(parents=False, exist_ok=True)  # create if doesn't exist, alert if parent doesn't exist.
         resume_checkpoint_file = os.path.join(output_dir, 'checkpoint.pth.tar')
         if os.path.isfile(resume_checkpoint_file):
-            print("=> loading checkpoint '{}'".format(resume_checkpoint_file))
+            print_if_main("=> Loading checkpoint '{}'".format(resume_checkpoint_file), is_main_process)
             if args.gpu is None:
                 checkpoint = torch.load(resume_checkpoint_file)
             else:
@@ -382,9 +327,9 @@ def main_worker(gpu, ngpus_per_node, args):
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
-            print("=> loaded checkpoint (epoch {})".format(checkpoint['epoch']))
+            print_if_main("=> Loaded checkpoint (epoch {})".format(checkpoint['epoch']), is_main_process)
         else:
-            print("=> no checkpoint found at '{}'".format(resume_checkpoint_file))
+            print_if_main("=> No checkpoint found at '{}'".format(resume_checkpoint_file), is_main_process)
 
     # Data loading code
     if args.dummy:
@@ -431,9 +376,11 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             transforms_fin = {X: transforms.Compose(post_blur_transforms[X]) for X in ['train', 'val']}
 
+        print_if_main('=> Creating datasets.', is_main_process)
         train_dataset = datasets.ImageFolder(traindir, transforms_fin['train'])
 
         val_dataset = datasets.ImageFolder(valdir, transforms_fin['val'])
+        print_if_main('=> Datasets created.', is_main_process)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -444,11 +391,11 @@ def main_worker(gpu, ngpus_per_node, args):
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+        num_workers=0, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True, sampler=val_sampler)
+        num_workers=0, pin_memory=True, sampler=val_sampler)
 
     # =========================
     # Add hooks for distillation
@@ -466,33 +413,40 @@ def main_worker(gpu, ngpus_per_node, args):
             hs = FeatureHook()
 
             get_last_conv(tchr_model, i).register_forward_hook(ht)
-            get_last_conv(model.module, i).register_forward_hook(hs)
+            if args.distributed:
+                get_last_conv(model.module, i).register_forward_hook(hs)
+            else:
+                get_last_conv(model, i).register_forward_hook(hs)
 
             tchr_hooks.append(ht)
             stdnt_hooks.append(hs)
 
     if args.evaluate:
+        print_if_main('=> Running validation.', is_main_process)
         validate(val_loader, model, criterion, args)
         return
 
+    print_if_main(f'=> Starting train loop from epoch {args.start_epoch}.', is_main_process)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
         train_stats = train(train_loader, model, criterion, optimizer, epoch, device, args,
-                            tchr_model, tchr_hooks, stdnt_hooks)
+                            tchr_model, tchr_hooks, stdnt_hooks, is_main_process)
 
-        print('Writing TB Train, epoch {}\n'.format(epoch))
-        writer_tb.add_scalar('Loss/Train_Loss', train_stats['loss'], epoch)
-        writer_tb.add_scalar('Top1/Train_Top1', train_stats['acc1'], epoch)
+        if writer_tb is not None:
+            print('Writing TB Train, epoch {}\n'.format(epoch))
+            writer_tb.add_scalar('Loss/Train_Loss', train_stats['loss'], epoch)
+            writer_tb.add_scalar('Top1/Train_Top1', train_stats['acc1'], epoch)
 
         # evaluate on validation set
         val_stats = validate(val_loader, model, criterion, args)
 
-        print('Writing TB Val, epoch {}\n'.format(epoch))
-        writer_tb.add_scalar('Loss/Val_Loss', val_stats['loss'], epoch)
-        writer_tb.add_scalar('Top1/Val_Top1', val_stats['acc1'], epoch)
+        if writer_tb is not None:
+            print('Writing TB Val, epoch {}\n'.format(epoch))
+            writer_tb.add_scalar('Loss/Val_Loss', val_stats['loss'], epoch)
+            writer_tb.add_scalar('Top1/Val_Top1', val_stats['acc1'], epoch)
 
         scheduler.step()
 
@@ -501,22 +455,21 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(val_stats['acc1'], best_acc1)
 
         if is_best:
-            print(f"New best top-1 accuracy! (epoch {epoch}, acc1={best_acc1})")
+            print_if_main(f"New best top-1 accuracy! (epoch {epoch}, acc1={best_acc1})", is_main_process)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                                                    and args.rank % ngpus_per_node == 0):
-            save_checkpoint_file_name = resume_checkpoint_file if args.resume else 'checkpoint.pth.tar'
-            save_checkpoint({
-                'epoch': epoch,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict()
-            }, is_best, filename=save_checkpoint_file_name)
+        save_checkpoint_file_name = resume_checkpoint_file if args.resume else 'checkpoint.pth.tar'
+        save_checkpoint({
+            'epoch': epoch,
+            'arch': args.arch,
+            'state_dict': model.state_dict(),
+            'best_acc1': best_acc1,
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict()
+        }, is_best, filename=save_checkpoint_file_name, is_main=is_main_process)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, args, tchr_model, tchr_hooks, stdnt_hooks):
+def train(train_loader, model, criterion, optimizer, epoch, device, args, tchr_model, tchr_hooks, stdnt_hooks, is_main):
+    print_if_main(f"=> Epoch {epoch}", is_main)
     use_accel = not args.no_accel and torch.accelerator.is_available()
 
     batch_time = AverageMeter('Time', use_accel, ':6.3f', Summary.NONE)
@@ -562,7 +515,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args, tchr_m
             # Combined weighted loss
             loss = cls_loss + args.alpha * att_loss
 
-            print(cls_loss.item(), att_loss.item())
+            # print_if_main(cls_loss.item(), att_loss.item(), is_main)
         else:
             loss = cls_loss
 
@@ -662,8 +615,8 @@ def validate(val_loader, model, criterion, args):
     return {'loss': losses.avg, 'acc1': top1.avg}
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    print(f'Saving checkpoint (epoch {state["epoch"]}) at: {filename}')
+def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', is_main=True):
+    print_if_main(f'Saving checkpoint (epoch {state["epoch"]}) at: {filename}', is_main)
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, filename.replace('checkpoint', 'model_best'))
@@ -772,7 +725,7 @@ class GaussianBlur(object):
     Args:
         sigma (int): Desired Gaussian blur level sigma
 
-    Taken from: W:\dannyh\work\code\PyTorch\vggface2_lookdir\datasets\custom_transforms.
+    Taken from: W:/dannyh/work/code/PyTorch/vggface2_lookdir/datasets/custom_transforms.
    """
 
     def __init__(self, sigma):
@@ -832,6 +785,11 @@ class GaussianBlurRand(object):
             return self.__class__.__name__ + '(sigma={}-{})'.format(self.sigma_min, self.sigma_max)
         else:
             return self.__class__.__name__ + '(sigma={})'.format(self.sigma_min)
+
+
+def print_if_main(msg, is_main_process):
+    if is_main_process:
+        print(msg)
 
 
 if __name__ == '__main__':
